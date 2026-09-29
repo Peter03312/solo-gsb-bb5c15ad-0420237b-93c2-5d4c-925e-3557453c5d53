@@ -40,7 +40,9 @@ WHOLESALE_REMOVE_RULES = {
     "property-removed",
     "property-removed-request",
     "property-removed-writeonly",
-    "server-removed",
+    # server-removed 刻意不在此列：它已精确到单个生效 URL（…/servers/{i}），
+    # 而对侧 server-added 的指针锚到 servers 数组容器，容器恰为条目下标指针
+    # 的前缀，参与吸收会把并列的"新增地址"误判为"移除地址"的下游影响。
 }
 
 WHOLESALE_RULES = WHOLESALE_REPLACE_RULES | WHOLESALE_REMOVE_RULES

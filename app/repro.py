@@ -2,8 +2,9 @@
 
 流程：
 1. 解析发现项端点，确定需要保留的 path / operation；
-2. 从旧、新文档分别裁剪：文档头（openapi / info，服务器类发现含 servers）
-   + 目标 path item（操作级发现只保留目标 operation 与 path 级 parameters）；
+2. 从旧、新文档分别裁剪：文档头（openapi / info，服务器类发现含根级
+   servers）+ 目标 path item（操作级发现只保留目标 operation、path 级
+   parameters 与 path 级 servers——操作生效 servers 可能继承自路径级）；
 3. 以裁剪结果为根做本地 $ref 闭包：把传递引用到的 components 复制进最小文档，
    visited 集合保证去重、循环引用安全终止；未被引用的路径与组件自然剔除；
 4. 用现有差异引擎 run_diff 复核目标发现的 rule_id / 方向 / 端点 / 语义定位
@@ -103,13 +104,14 @@ def _needs_security(finding: dict[str, Any]) -> bool:
     )
 
 
-def _trim_path_item(item: Any, method: str | None) -> Any:
+def _trim_path_item(item: Any, method: str | None, keep_servers: bool = False) -> Any:
     """裁剪单个 path item。
 
     - 路径级发现（method=None）：整个 path item 都属于发现现场，原样保留；
     - 引用型 path item：保留 $ref，由闭包把目标组件复制进来；
     - 操作级发现：只保留目标 operation 与 path 级 parameters
-      （引擎会把 path 级参数合并进操作比较，必须保留才能原样复现）。
+      （引擎会把 path 级参数合并进操作比较，必须保留才能原样复现）；
+      服务器类发现另保留 path 级 servers（操作生效 servers 可能继承自路径级）。
     """
     if not isinstance(item, dict):
         return copy.deepcopy(item)
@@ -118,6 +120,8 @@ def _trim_path_item(item: Any, method: str | None) -> Any:
     out: dict[str, Any] = {}
     if isinstance(item.get("parameters"), list):
         out["parameters"] = copy.deepcopy(item["parameters"])
+    if keep_servers and isinstance(item.get("servers"), list):
+        out["servers"] = copy.deepcopy(item["servers"])
     if isinstance(item.get(method), dict):
         out[method] = copy.deepcopy(item[method])
     return out
@@ -143,7 +147,7 @@ def _minimal_doc(
     kept: dict[str, Any] = {}
     if path is not None and path in paths:
         # 该侧没有此路径时不补空壳：路径缺失本身就是差异现场（如 path-removed）
-        kept[path] = _trim_path_item(paths[path], method)
+        kept[path] = _trim_path_item(paths[path], method, keep_servers)
     out["paths"] = kept
     return out
 

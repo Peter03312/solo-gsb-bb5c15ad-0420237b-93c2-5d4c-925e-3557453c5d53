@@ -259,19 +259,7 @@ class Engine:
     # 根 / 路径 / 操作
     # ------------------------------------------------------------------ #
     def _compare_roots(self) -> None:
-        ov, nv = str(self.old.get("openapi")), str(self.new.get("openapi"))
-        if ov != nv:
-            self.add(
-                rule_id="openapi-version", severity=INFO, category="元数据",
-                direction="none", change="changed", endpoint=None,
-                location="openapi",
-                old_json_path="/openapi", new_json_path="/openapi",
-                old_ref=None, new_ref=None,
-                message=f"OpenAPI 声明版本由 {ov} 变更为 {nv}。",
-                old_value=ov, new_value=nv,
-            )
-
-        self._compare_servers()
+        self._compare_openapi_version()
 
         old_paths = self.old.get("paths") or {}
         new_paths = self.new.get("paths") or {}
@@ -303,39 +291,29 @@ class Engine:
         for p in sorted(old_set & new_set):
             self._compare_path_item(p, old_paths[p], new_paths[p])
 
-    def _compare_servers(self) -> None:
-        old_urls = [s.get("url") for s in (self.old.get("servers") or []) if isinstance(s, dict)]
-        new_urls = [s.get("url") for s in (self.new.get("servers") or []) if isinstance(s, dict)]
-        for u in old_urls:
-            if u not in new_urls:
-                self.add(
-                    rule_id="server-removed", severity=BREAKING, category="服务器",
-                    direction="none", change="removed", endpoint=None,
-                    location="servers",
-                    old_json_path="/servers", new_json_path="/servers",
-                    old_ref=None, new_ref=None,
-                    message=f"移除服务器地址 {u}，仍在使用该地址的客户端将无法访问。",
-                    old_value=u, new_value=None,
-                )
-        for u in new_urls:
-            if u not in old_urls:
-                self.add(
-                    rule_id="server-added", severity=NON_BREAKING, category="服务器",
-                    direction="none", change="added", endpoint=None,
-                    location="servers",
-                    old_json_path="/servers", new_json_path="/servers",
-                    old_ref=None, new_ref=None,
-                    message=f"新增服务器地址 {u}。",
-                    old_value=None, new_value=u,
-                )
+    def _compare_openapi_version(self) -> None:
+        ov, nv = str(self.old.get("openapi")), str(self.new.get("openapi"))
+        if ov != nv:
+            self.add(
+                rule_id="openapi-version", severity=INFO, category="元数据",
+                direction="none", change="changed", endpoint=None,
+                location="openapi",
+                old_json_path="/openapi", new_json_path="/openapi",
+                old_ref=None, new_ref=None,
+                message=f"OpenAPI 声明版本由 {ov} 变更为 {nv}。",
+                old_value=ov, new_value=nv,
+            )
 
     def _compare_path_item(self, path: str, raw_old_item: Any, raw_new_item: Any) -> None:
-        old_item, _ = self._target(self.old, raw_old_item)
-        new_item, _ = self._target(self.new, raw_new_item)
+        old_item, old_item_ptr = self._target(self.old, raw_old_item)
+        new_item, new_item_ptr = self._target(self.new, raw_new_item)
         if not isinstance(old_item, dict):
             old_item = {}
         if not isinstance(new_item, dict):
             new_item = {}
+        path_ptr = f"/paths{encode_path(path)}"
+        old_item_ptr = old_item_ptr or path_ptr
+        new_item_ptr = new_item_ptr or path_ptr
 
         old_methods = {m for m in HTTP_METHODS if isinstance(old_item.get(m), dict)}
         new_methods = {m for m in HTTP_METHODS if isinstance(new_item.get(m), dict)}
@@ -346,7 +324,7 @@ class Engine:
                 direction="none", change="added", endpoint=f"{m.upper()} {path}",
                 location=f"paths{path}.{m}",
                 old_json_path=None,
-                new_json_path=f"/paths{encode_path(path)}/{m}",
+                new_json_path=f"{new_item_ptr}/{m}",
                 old_ref=None, new_ref=None,
                 message=f"新增操作 {m.upper()} {path}。",
             )
@@ -355,7 +333,7 @@ class Engine:
                 rule_id="operation-removed", severity=BREAKING, category="操作",
                 direction="none", change="removed", endpoint=f"{m.upper()} {path}",
                 location=f"paths{path}.{m}",
-                old_json_path=f"/paths{encode_path(path)}/{m}", new_json_path=None,
+                old_json_path=f"{old_item_ptr}/{m}", new_json_path=None,
                 old_ref=None, new_ref=None,
                 message=f"删除操作 {m.upper()} {path}，调用方将收到 404/405。",
             )
@@ -364,7 +342,8 @@ class Engine:
             self._compare_operation(
                 path, m,
                 raw_old_item, raw_new_item,
-                old_item[m], new_item[m],
+                old_item, new_item,
+                old_item_ptr, new_item_ptr,
             )
 
     def _compare_operation(
@@ -373,16 +352,23 @@ class Engine:
         method: str,
         old_path_item: Any,
         new_path_item: Any,
-        raw_old_op: Any,
-        raw_new_op: Any,
+        old_item: dict[str, Any],
+        new_item: dict[str, Any],
+        old_item_ptr: str,
+        new_item_ptr: str,
     ) -> None:
-        old_op, _ = self._target(self.old, raw_old_op)
-        new_op, _ = self._target(self.new, raw_new_op)
+        raw_old_op = old_item[method]
+        raw_new_op = new_item[method]
+        old_op, old_op_ptr = self._target(self.old, raw_old_op)
+        new_op, new_op_ptr = self._target(self.new, raw_new_op)
         if not isinstance(old_op, dict) or not isinstance(new_op, dict):
             return
 
         endpoint = f"{method.upper()} {path}"
-        base = f"/paths{encode_path(path)}/{method}"
+        old_base = f"{old_item_ptr}/{method}"
+        new_base = f"{new_item_ptr}/{method}"
+        old_op_ptr = old_op_ptr or old_base
+        new_op_ptr = new_op_ptr or new_base
 
         old_dep = bool(old_op.get("deprecated"))
         new_dep = bool(new_op.get("deprecated"))
@@ -391,8 +377,8 @@ class Engine:
                 rule_id="operation-deprecated", severity=DEPRECATION,
                 category="操作", direction="none", change="changed",
                 endpoint=endpoint, location=f"paths{path}.{method}.deprecated",
-                old_json_path=base + "/deprecated",
-                new_json_path=base + "/deprecated",
+                old_json_path=old_base + "/deprecated",
+                new_json_path=new_base + "/deprecated",
                 old_ref=None, new_ref=None,
                 message=f"操作 {endpoint} 已标记为 deprecated，未来版本可能移除。",
                 old_value=False, new_value=True,
@@ -402,8 +388,8 @@ class Engine:
                 rule_id="operation-un-deprecated", severity=NON_BREAKING,
                 category="操作", direction="none", change="changed",
                 endpoint=endpoint, location=f"paths{path}.{method}.deprecated",
-                old_json_path=base + "/deprecated",
-                new_json_path=base + "/deprecated",
+                old_json_path=old_base + "/deprecated",
+                new_json_path=new_base + "/deprecated",
                 old_ref=None, new_ref=None,
                 message=f"操作 {endpoint} 取消了 deprecated 标记。",
                 old_value=True, new_value=False,
@@ -415,8 +401,8 @@ class Engine:
                 rule_id="operation-id-changed", severity=INFO, category="操作",
                 direction="none", change="changed", endpoint=endpoint,
                 location=f"paths{path}.{method}.operationId",
-                old_json_path=base + "/operationId",
-                new_json_path=base + "/operationId",
+                old_json_path=old_base + "/operationId",
+                new_json_path=new_base + "/operationId",
                 old_ref=None, new_ref=None,
                 message=(
                     f"operationId 由 {oid1!r} 变为 {oid2!r}，"
@@ -426,15 +412,28 @@ class Engine:
             )
 
         self._compare_parameters(
-            endpoint, base,
+            endpoint, old_base, new_base,
             old_path_item, new_path_item,
-            old_op, new_op, path
+            old_op, new_op,
         )
-        self._compare_request_body(endpoint, base, old_op, new_op)
-        self._compare_responses(endpoint, base, old_op, new_op)
+        self._compare_request_body(endpoint, old_base, new_base, old_op, new_op)
+        self._compare_responses(endpoint, old_base, new_base, old_op, new_op)
         self._compare_security(
-            endpoint, base, raw_old_op, old_op, raw_new_op, new_op
+            endpoint, old_base, new_base, old_op_ptr, new_op_ptr,
+            raw_old_op, old_op, raw_new_op, new_op
         )
+        path_ptr = f"/paths{encode_path(path)}"
+        old_eff = self._effective_servers(
+            raw_old_op, old_op, old_op_ptr, old_base,
+            old_path_item, old_item, old_item_ptr, path_ptr,
+            self.old.get("servers"),
+        )
+        new_eff = self._effective_servers(
+            raw_new_op, new_op, new_op_ptr, new_base,
+            new_path_item, new_item, new_item_ptr, path_ptr,
+            self.new.get("servers"),
+        )
+        self._compare_servers(endpoint, old_eff, new_eff)
 
     # ------------------------------------------------------------------ #
     # 认证要求（security）
@@ -444,7 +443,8 @@ class Engine:
         root_security: Any,
         raw_op: Any,
         op: dict[str, Any],
-        base: str,
+        op_ptr: str,
+        base_ptr: str,
     ) -> tuple[Any, str, str]:
         """计算操作的有效 security：(原始 security, JSON Pointer, 来源)。
 
@@ -454,18 +454,21 @@ class Engine:
         来源取值：operation / root / default。
         """
         if isinstance(raw_op, dict) and "security" in raw_op:
-            return raw_op.get("security"), base + "/security", "operation"
+            return raw_op.get("security"), base_ptr + "/security", "operation"
         if isinstance(op, dict) and "security" in op:
-            return op.get("security"), base + "/security", "operation"
+            return op.get("security"), op_ptr + "/security", "operation"
         # 根级显式声明（含 security: [] 显式允许匿名）；非数组的非法值按匿名处理
         if isinstance(root_security, list):
             return root_security, "/security", "root"
-        return None, base, "default"
+        return None, base_ptr, "default"
 
     def _compare_security(
         self,
         endpoint: str,
-        base: str,
+        old_base: str,
+        new_base: str,
+        old_op_ptr: str,
+        new_op_ptr: str,
         raw_old_op: Any,
         old_op: dict[str, Any],
         raw_new_op: Any,
@@ -478,10 +481,10 @@ class Engine:
         "要求不更严"的组合即破坏；否则有效要求有变化记为兼容。
         """
         old_sec, old_ptr, old_src = self._effective_security(
-            self.old.get("security"), raw_old_op, old_op, base
+            self.old.get("security"), raw_old_op, old_op, old_op_ptr, old_base
         )
         new_sec, new_ptr, new_src = self._effective_security(
-            self.new.get("security"), raw_new_op, new_op, base
+            self.new.get("security"), raw_new_op, new_op, new_op_ptr, new_base
         )
         old_alts = _sec_alternatives(old_sec)
         new_alts = _sec_alternatives(new_sec)
@@ -530,6 +533,158 @@ class Engine:
             )
 
     # ------------------------------------------------------------------ #
+    # 服务器地址（servers）
+    # ------------------------------------------------------------------ #
+    def _server_entries(self, node: Any, array_ptr: str) -> list[dict[str, Any]]:
+        """从 servers 数组提取有效条目：跳过非对象 / 无字符串 url，按 url 去重。"""
+        entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if not isinstance(node, list):
+            return entries
+        for idx, s in enumerate(node):
+            if not isinstance(s, dict) or not isinstance(s.get("url"), str):
+                continue
+            url = s["url"]
+            if url in seen:
+                continue
+            seen.add(url)
+            entries.append({
+                "url": url,
+                "pointer": f"{array_ptr}/{idx}",
+                "server": s,
+            })
+        return entries
+
+    def _effective_servers(
+        self,
+        raw_op: Any,
+        op: dict[str, Any],
+        op_ptr: str,
+        op_base: str,
+        raw_item: Any,
+        item: dict[str, Any],
+        item_ptr: str,
+        item_inline_ptr: str,
+        root_servers: Any,
+    ) -> tuple[list[dict[str, Any]], str, str, bool]:
+        """计算操作实际生效的 servers：(条目列表, 数组声明指针, 来源, 是否显式)。
+
+        按 OpenAPI 3.x 优先级：操作级 → 路径级 → 根级，各层取**首个非空
+        servers 列表**（空数组 [] 或数组内无合法 Server 对象视为该层为空，
+        继续向下一层回退）；三层都没有可用地址时使用 OpenAPI 默认地址 "/"
+        （explicit=False——默认地址并非文档显式声明，不与另一侧的显式
+        servers 互相报告增删）。
+        来源取值：operation / path / root / default。
+        """
+        # 操作级：先看原始节点（含 $ref 兄弟字段），再看解引用目标
+        if isinstance(raw_op, dict) and isinstance(raw_op.get("servers"), list):
+            array_ptr = op_base + "/servers"
+            entries = self._server_entries(raw_op["servers"], array_ptr)
+            if entries:
+                return entries, array_ptr, "operation", True
+        if isinstance(op, dict) and isinstance(op.get("servers"), list):
+            array_ptr = op_ptr + "/servers"
+            entries = self._server_entries(op["servers"], array_ptr)
+            if entries:
+                return entries, array_ptr, "operation", True
+
+        # 路径级（Path Item 对象可经 $ref 引用 components.pathItems）
+        if isinstance(raw_item, dict) and isinstance(raw_item.get("servers"), list):
+            array_ptr = item_inline_ptr + "/servers"
+            entries = self._server_entries(raw_item["servers"], array_ptr)
+            if entries:
+                return entries, array_ptr, "path", True
+        if isinstance(item, dict) and isinstance(item.get("servers"), list):
+            array_ptr = item_ptr + "/servers"
+            entries = self._server_entries(item["servers"], array_ptr)
+            if entries:
+                return entries, array_ptr, "path", True
+
+        # 根级
+        if isinstance(root_servers, list):
+            entries = self._server_entries(root_servers, "/servers")
+            if entries:
+                return entries, "/servers", "root", True
+
+        # 三层均无可用地址：OpenAPI 默认服务器地址（非显式声明）
+        return (
+            [{"url": "/", "pointer": None, "server": {"url": "/"}}],
+            op_base, "default", False,
+        )
+
+    def _compare_servers(
+        self,
+        endpoint: str,
+        old_eff: tuple[list[dict[str, Any]], str, str, bool],
+        new_eff: tuple[list[dict[str, Any]], str, str, bool],
+    ) -> None:
+        """比较两版同一操作**实际生效**的 servers（仅两版都存在的操作）。
+
+        入参为两侧 _effective_servers 的结果：
+        (条目列表, 数组声明指针, 来源 operation/path/root/default, 是否显式)。
+
+        生效顺序：操作级 → 路径级 → 根级，各层取首个非空列表，均无则 "/"。
+        按 URL 去重后做集合比较：旧版独有 = 破坏性移除（server-removed），
+        新版独有 = 兼容新增（server-added）；被低层覆盖的根地址不产生发现，
+        生效地址集合相同（仅声明位置变化）也不产生发现。隐式默认地址 "/"
+        只有在另一侧也显式声明了 "/" 时才作为普通 URL 参与，否则不报。
+        """
+        old_entries, old_array_ptr, old_src, old_explicit = old_eff
+        new_entries, new_array_ptr, new_src, new_explicit = new_eff
+        if not old_explicit and not new_explicit:
+            return
+
+        old_by_url = {e["url"]: e for e in old_entries}
+        new_by_url = {e["url"]: e for e in new_entries}
+        removed = set(old_by_url) - set(new_by_url)
+        added = set(new_by_url) - set(old_by_url)
+        if not old_explicit:
+            # 旧版只是 OpenAPI 默认地址（未显式声明 servers）：隐式 "/" 不算
+            # 被移除的声明，避免对回退默认值误报
+            removed.discard("/")
+        if not new_explicit:
+            added.discard("/")
+        if not removed and not added:
+            return
+
+        old_value = _servers_value(old_entries, old_src, old_array_ptr)
+        new_value = _servers_value(new_entries, new_src, new_array_ptr)
+
+        for url in sorted(removed):
+            entry = old_by_url[url]
+            self.add(
+                rule_id="server-removed", severity=BREAKING, category="服务器",
+                direction="none", change="removed", endpoint=endpoint,
+                location=f"servers[{url}]",
+                old_json_path=entry["pointer"] or old_array_ptr,
+                new_json_path=new_array_ptr,
+                old_ref=None, new_ref=None,
+                message=(
+                    f"操作 {endpoint} 实际生效的服务器地址 {url} 被移除"
+                    f"（旧版生效声明：{_server_source_cn(old_src)}；"
+                    f"新版生效声明：{_server_source_cn(new_src)}），"
+                    "仍在使用该地址的客户端将无法访问。"
+                ),
+                old_value=old_value, new_value=new_value,
+            )
+        for url in sorted(added):
+            entry = new_by_url[url]
+            self.add(
+                rule_id="server-added", severity=NON_BREAKING, category="服务器",
+                direction="none", change="added", endpoint=endpoint,
+                location=f"servers[{url}]",
+                old_json_path=old_array_ptr,
+                new_json_path=entry["pointer"] or new_array_ptr,
+                old_ref=None, new_ref=None,
+                message=(
+                    f"操作 {endpoint} 实际生效的服务器新增地址 {url}"
+                    f"（旧版生效声明：{_server_source_cn(old_src)}；"
+                    f"新版生效声明：{_server_source_cn(new_src)}）。"
+                ),
+                old_value=old_value, new_value=new_value,
+            )
+
+    # ------------------------------------------------------------------ #
     # 参数
     # ------------------------------------------------------------------ #
     def _collect_params(
@@ -550,12 +705,12 @@ class Engine:
     def _compare_parameters(
         self,
         endpoint: str,
-        base: str,
+        old_base: str,
+        new_base: str,
         old_item: dict,
         new_item: dict,
         old_op: dict,
         new_op: dict,
-        path: str,
     ) -> None:
         old_params = self._collect_params(self.old, (old_item, old_op))
         new_params = self._collect_params(self.new, (new_item, new_op))
@@ -571,7 +726,7 @@ class Engine:
                     category="参数", direction="request", change="added",
                     endpoint=endpoint,
                     location=f"parameters[{key[1]} in {key[0]}]",
-                    old_json_path=None, new_json_path=base + "/parameters",
+                    old_json_path=None, new_json_path=new_base + "/parameters",
                     old_ref=None, new_ref=_ref_of(p),
                     message=(
                         f"新增必填{_loc_cn(key[0])}参数 '{key[1]}'，"
@@ -585,7 +740,7 @@ class Engine:
                     category="参数", direction="request", change="added",
                     endpoint=endpoint,
                     location=f"parameters[{key[1]} in {key[0]}]",
-                    old_json_path=None, new_json_path=base + "/parameters",
+                    old_json_path=None, new_json_path=new_base + "/parameters",
                     old_ref=None, new_ref=_ref_of(p),
                     message=f"新增可选{_loc_cn(key[0])}参数 '{key[1]}'。",
                     old_value=None, new_value=_param_brief(p),
@@ -599,7 +754,7 @@ class Engine:
                 category="参数", direction="request", change="removed",
                 endpoint=endpoint,
                 location=f"parameters[{key[1]} in {key[0]}]",
-                old_json_path=base + "/parameters", new_json_path=None,
+                old_json_path=old_base + "/parameters", new_json_path=None,
                 old_ref=_ref_of(p), new_ref=None,
                 message=(
                     f"移除{_loc_cn(key[0])}参数 '{key[1]}'"
@@ -611,7 +766,7 @@ class Engine:
 
         for key in sorted(old_keys & new_keys):
             self._compare_parameter(
-                endpoint, base, key,
+                endpoint, old_base, new_base, key,
                 old_params[key], new_params[key],
                 old_op.get("parameters"), new_op.get("parameters"),
             )
@@ -634,7 +789,7 @@ class Engine:
         return None
 
     def _compare_parameter(
-        self, endpoint: str, base: str, key: tuple[str, str],
+        self, endpoint: str, old_base: str, new_base: str, key: tuple[str, str],
         old_p: Any, new_p: Any,
         old_raw_params: Any = None, new_raw_params: Any = None,
     ) -> None:
@@ -646,8 +801,8 @@ class Engine:
         common = dict(
             category="参数", direction="request", endpoint=endpoint,
             location=loc,
-            old_json_path=base + "/parameters",
-            new_json_path=base + "/parameters",
+            old_json_path=old_base + "/parameters",
+            new_json_path=new_base + "/parameters",
             old_ref=old_ref, new_ref=new_ref,
         )
 
@@ -705,7 +860,7 @@ class Engine:
         if isinstance(old_schema, dict) and isinstance(new_schema, dict):
             ctx = Ctx(
                 direction="request", endpoint=endpoint,
-                base=base,
+                base=old_base,
                 loc=loc,
                 old_ref=old_ref, new_ref=new_ref,
                 category="参数",
@@ -724,7 +879,8 @@ class Engine:
     # 请求体
     # ------------------------------------------------------------------ #
     def _compare_request_body(
-        self, endpoint: str, base: str, old_op: dict, new_op: dict
+        self, endpoint: str, old_base: str, new_base: str,
+        old_op: dict, new_op: dict
     ) -> None:
         old_rb = old_op.get("requestBody")
         new_rb = new_op.get("requestBody")
@@ -739,7 +895,7 @@ class Engine:
                 category="请求体", direction="request",
                 change="added", endpoint=endpoint,
                 location="requestBody",
-                old_json_path=None, new_json_path=base + "/requestBody",
+                old_json_path=None, new_json_path=new_base + "/requestBody",
                 old_ref=None, new_ref=_ref_of(new_op.get("requestBody")) or new_ref,
                 message=(
                     "新增请求体且为必填，未携带请求体的现有请求会被拒绝。"
@@ -752,7 +908,7 @@ class Engine:
             if isinstance(new_rb, dict):
                 self._compare_content(
                     None, new_rb.get("content"), "request", endpoint,
-                    base + "/requestBody", "requestBody", None,
+                    new_base + "/requestBody", "requestBody", None,
                     _ref_of(new_op.get("requestBody")),
                 )
             return
@@ -763,7 +919,7 @@ class Engine:
                 category="请求体", direction="request",
                 change="removed", endpoint=endpoint,
                 location="requestBody",
-                old_json_path=base + "/requestBody", new_json_path=None,
+                old_json_path=old_base + "/requestBody", new_json_path=None,
                 old_ref=_ref_of(old_rb), new_ref=None,
                 message="移除请求体定义；原有客户端继续发送通常被忽略（请确认服务端是否拒绝）。",
                 old_value={"mediaTypes": _media_types(self._safe_deref(self.old, old_rb))},
@@ -785,8 +941,8 @@ class Engine:
                 rule_id="request-body-became-required", severity=BREAKING,
                 category="请求体", direction="request", change="changed",
                 endpoint=endpoint, location="requestBody.required",
-                old_json_path=base + "/requestBody/required",
-                new_json_path=base + "/requestBody/required",
+                old_json_path=old_base + "/requestBody/required",
+                new_json_path=new_base + "/requestBody/required",
                 old_ref=old_ref, new_ref=new_ref,
                 message="请求体由可选变为必填，不带请求体的现有调用会被拒绝。",
                 old_value=False, new_value=True,
@@ -796,8 +952,8 @@ class Engine:
                 rule_id="request-body-became-optional", severity=NON_BREAKING,
                 category="请求体", direction="request", change="changed",
                 endpoint=endpoint, location="requestBody.required",
-                old_json_path=base + "/requestBody/required",
-                new_json_path=base + "/requestBody/required",
+                old_json_path=old_base + "/requestBody/required",
+                new_json_path=new_base + "/requestBody/required",
                 old_ref=old_ref, new_ref=new_ref,
                 message="请求体由必填变为可选。",
                 old_value=True, new_value=False,
@@ -805,7 +961,7 @@ class Engine:
 
         self._compare_content(
             old_rb_d.get("content"), new_rb_d.get("content"),
-            "request", endpoint, base + "/requestBody",
+            "request", endpoint, old_base + "/requestBody",
             "requestBody", old_ref, new_ref,
         )
 
@@ -813,7 +969,8 @@ class Engine:
     # 响应
     # ------------------------------------------------------------------ #
     def _compare_responses(
-        self, endpoint: str, base: str, old_op: dict, new_op: dict
+        self, endpoint: str, old_base: str, new_base: str,
+        old_op: dict, new_op: dict
     ) -> None:
         old_resp = old_op.get("responses")
         new_resp = new_op.get("responses")
@@ -829,7 +986,7 @@ class Engine:
                 category="响应", direction="response", change="added",
                 endpoint=endpoint, location=f"responses[{code}]",
                 old_json_path=None,
-                new_json_path=f"{base}/responses/{encode_token(str(code))}",
+                new_json_path=f"{new_base}/responses/{encode_token(str(code))}",
                 old_ref=None, new_ref=_ref_of(new_resp[code]),
                 message=f"新增响应 {code}（{'成功响应，属于兼容扩展' if severity == NON_BREAKING else '非成功/默认响应，提示性变更'}）。",
                 old_value=None, new_value=str(code),
@@ -840,7 +997,7 @@ class Engine:
                 rule_id="response-removed", severity=BREAKING,
                 category="响应", direction="response", change="removed",
                 endpoint=endpoint, location=f"responses[{code}]",
-                old_json_path=f"{base}/responses/{encode_token(str(code))}",
+                old_json_path=f"{old_base}/responses/{encode_token(str(code))}",
                 new_json_path=None,
                 old_ref=_ref_of(old_resp[code]), new_ref=None,
                 message=(
@@ -859,8 +1016,8 @@ class Engine:
             common = dict(
                 category="响应", direction="response", change="changed",
                 endpoint=endpoint, location=f"responses[{code}]",
-                old_json_path=f"{base}/responses/{encode_token(str(code))}",
-                new_json_path=f"{base}/responses/{encode_token(str(code))}",
+                old_json_path=f"{old_base}/responses/{encode_token(str(code))}",
+                new_json_path=f"{new_base}/responses/{encode_token(str(code))}",
                 old_ref=old_ref, new_ref=new_ref,
             )
             if not new_r.get("deprecated", False) and old_r.get("deprecated", False):
@@ -879,7 +1036,7 @@ class Engine:
             self._compare_content(
                 old_r.get("content"), new_r.get("content"),
                 "response", endpoint,
-                f"{base}/responses/{encode_token(str(code))}",
+                f"{old_base}/responses/{encode_token(str(code))}",
                 f"responses[{code}]", old_ref, new_ref,
             )
 
@@ -1840,6 +1997,39 @@ def _sec_value(security: Any, alts: frozenset[frozenset], source: str) -> dict[s
         "source": source,  # operation=操作级覆盖 | root=继承根级 | default=缺省匿名
         "raw": security,
         "alternatives": [_sec_combo_json(c) for c in sorted(alts, key=_sec_combo_sort)],
+    }
+
+
+# ---------------------------------------------------------------------- #
+# 服务器地址（servers）
+# ---------------------------------------------------------------------- #
+SERVER_SOURCE_CN = {
+    "operation": "操作级 servers",
+    "path": "路径级 servers",
+    "root": "根级 servers",
+    "default": "默认地址（未声明 servers，按 OpenAPI 规则取 /）",
+}
+
+
+def _server_source_cn(source: str) -> str:
+    return SERVER_SOURCE_CN.get(source, source)
+
+
+def _servers_value(
+    entries: list[dict[str, Any]], source: str, array_pointer: str
+) -> dict[str, Any]:
+    """发现项的旧值 / 新值：实际生效的 servers + 生效层与声明位置。"""
+    return {
+        "source": source,  # operation | path | root | default
+        "source_label": _server_source_cn(source),
+        "array_pointer": array_pointer,
+        "servers": [
+            {
+                "url": e["url"],
+                "pointer": e["pointer"],
+            }
+            for e in entries
+        ],
     }
 
 

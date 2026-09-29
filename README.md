@@ -99,7 +99,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 \* 请求字段从契约移除时服务端可能开始忽略/拒绝，工具以兼容记录并在原因中注明。
 
-结构层面还覆盖：路径与操作的新增/删除、pathItem 级与操作级参数合并比较、参数必填性 / `style` / `explode` / `deprecated`、请求体必填性变化、媒体类型增删（请求 415 / 响应 Content-Type）、响应状态码增删、`servers` 增删、`operationId` 变化、`oneOf/anyOf` 分支增删等。
+结构层面还覆盖：路径与操作的新增/删除、pathItem 级与操作级参数合并比较、参数必填性 / `style` / `explode` / `deprecated`、请求体必填性变化、媒体类型增删（请求 415 / 响应 Content-Type）、响应状态码增删、**按操作级 / 路径级 / 根级生效顺序计算的 `servers` 增删**、`operationId` 变化、`oneOf/anyOf` 分支增删等。
 
 ### 🔐 认证要求（security）兼容性
 
@@ -129,6 +129,77 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `[]` | `[{}]` | — 等价，无发现 |
 
 内置示例「**认证要求收紧**」演示根级继承、操作级覆盖、`[]` 与 `[{}]` 等价、scope 追加、方案替换与新增「或」分支等场景。
+
+### 🌐 服务器地址（servers）兼容性
+
+`servers` 可以声明在**三个层级**，OpenAPI 规定了明确的生效优先级，仅比较根级会同时产生误报与漏报。本工具对**两版都存在的 paths 操作**（新增 / 删除操作另由 `operation-added` / `operation-removed` 覆盖，不重复给服务器结论）分别计算每侧**实际生效的 servers** 后再比较：
+
+- **生效顺序（自高到低）**：**操作级**（`/paths/{path}/{method}/servers`）→ **路径级**（Path Item 对象的 `servers`，含 `$ref` 到 `components.pathItems` 的目标）→ **根级**（`/servers`）。各层取**首个非空列表**：某层缺省、是空数组 `[]` 或数组内没有合法 Server 对象时，继续向下一层回退；三层都没有可用地址时，按 OpenAPI 规则取**默认地址 `/`**（视为未显式声明）。
+- **去重比较**：生效列表内按 **URL 去重**（同一 url 重复出现只算一个），再对两侧 URL 集合做差：
+  - 旧版独有 URL → 🔴 破坏（`server-removed`）：仍在使用该地址的客户端将无法访问；
+  - 新版独有 URL → 🟢 兼容（`server-added`）：新增可访问地址，现有客户端不受影响；
+  - URL 集合完全相同（哪怕声明层级发生移动，如根级搬到操作级）→ **无发现**。
+- **被覆盖的地址不产生发现**：操作级 / 路径级已声明 servers 时，根级地址只是"未生效声明"，其增删改不会触发任何发现——这修正了旧版"只看根级"导致的两类错误：根地址已被操作级覆盖却误报移除（误报）、路径级 / 操作级地址变化却完全不报（漏报）。
+- **默认地址 `/`**：两侧都未显式声明 servers（都回落到 `/`）时无发现；一侧显式声明、另一侧为默认 `/` 时，只就**显式声明的那一侧**报告（显式 → 默认报移除，默认 → 显式报新增），隐式的 `/` 本身不被当作"被删除的声明"。
+- **定位**：每条发现标出操作（端点，如 `GET /pets`）、变化的具体 URL（`location` 为 `servers[<url>]`）、旧 / 新两侧的**生效声明层级与位置**（消息中的"旧版生效声明 / 新版生效声明"：操作级 / 路径级 / 根级 servers / 默认地址；`old_json_path` / `new_json_path` 精确到生效 servers 数组或具体条目下标），以及 `old_value` / `new_value`（`source` = `operation` / `path` / `root` / `default`、`array_pointer`、去重后生效的 `servers: [{url, pointer}]`）。
+- 该类发现归类为 **服务器 / 结构方向**，自动接入级别 / 方向 / 分类 / 关键字**筛选**、Markdown / JSON **报告**、根因聚合、破坏项**限时豁免**与**破坏项对账**；最小复现包会保留根级 `servers` 与路径级 `servers`（及被引用的 pathItem 组件）以保证可复现。
+
+服务器规则示例（每一行均针对同一个共同操作）：
+
+| 旧版生效 servers | 新版生效 servers | 结论 |
+| --- | --- | --- |
+| 操作级 `[B]`（根级 `[A]` 被覆盖） | 操作级 `[B]`（根级变为 `[A,C]`） | — 根地址增删不影响该操作，无发现 |
+| 路径级 `[B]` | 路径级 `[B2]` | 🔴 移除 `B`、🟢 新增 `B2`（精确锚到路径级 servers） |
+| 根级 `[A]` | 根级 `[C]` | 🔴 移除 `A`、🟢 新增 `C` |
+| 未声明（默认 `/`） | 根级 `[C]` | 🟢 新增 `C`（不把隐式 `/` 报为移除） |
+| 根级 `[A]` | 未声明（默认 `/`） | 🔴 移除 `A` |
+| 根级 `[A]` | 操作级 `[A]` | — URL 集合相同，仅声明位置移动，无发现 |
+| 操作级 `[B, B2]` | 操作级 `[B2, B3]` | 🔴 移除 `B`、🟢 新增 `B3`（按 URL 去重） |
+| 操作级 `servers: []`（空，回落根级 `[A]`） | 同左，根级追加 `[C]` | 🟢 新增 `C`（空数组按规则回落） |
+
+#### HTTP API 调用示例
+
+沿用现有审查接口 `POST /api/reviews`（无需新端点）：提交新旧两份文档，服务器发现与其他发现一起返回在 `findings` 中，可直接经既有筛选 / 报告 / 豁免 / 对账 / 复现包接口使用。
+
+```bash
+curl -X POST http://localhost:8000/api/reviews \
+  -H "Content-Type: application/json" \
+  -d '{
+    "old_spec": "{\n  \"openapi\": \"3.0.3\",\n  \"info\": {\"title\": \"Pets\"},\n  \"paths\": {\n    \"/pets\": {\n      \"get\": {\n        \"servers\": [{\"url\": \"https://old.example.com/v1\"}],\n        \"responses\": {\"200\": {\"description\": \"ok\"}}\n      }\n    }\n  }\n}",
+    "new_spec": "{\n  \"openapi\": \"3.0.3\",\n  \"info\": {\"title\": \"Pets\"},\n  \"paths\": {\n    \"/pets\": {\n      \"get\": {\n        \"servers\": [{\"url\": \"https://new.example.com/v2\"}],\n        \"responses\": {\"200\": {\"description\": \"ok\"}}\n      }\n    }\n  }\n}"
+  }'
+```
+
+响应中的相关发现（节选，JSON 报告 `GET /api/reviews/{id}/report?format=json` 同构）：
+
+```json
+{
+  "rule_id": "server-removed",
+  "severity": "breaking",
+  "category": "服务器",
+  "direction": "none",
+  "change": "removed",
+  "endpoint": "GET /pets",
+  "location": "servers[https://old.example.com/v1]",
+  "old_json_path": "/paths/pets/get/servers/0",
+  "new_json_path": "/paths/pets/get/servers",
+  "message": "操作 GET /pets 实际生效的服务器地址 https://old.example.com/v1 被移除（旧版生效声明：操作级 servers；新版生效声明：操作级 servers），仍在使用该地址的客户端将无法访问。",
+  "old_value": {
+    "source": "operation",
+    "source_label": "操作级 servers",
+    "array_pointer": "/paths/pets/get/servers",
+    "servers": [{"url": "https://old.example.com/v1", "pointer": "/paths/pets/get/servers/0"}]
+  },
+  "new_value": {
+    "source": "operation",
+    "source_label": "操作级 servers",
+    "array_pointer": "/paths/pets/get/servers",
+    "servers": [{"url": "https://new.example.com/v2", "pointer": "/paths/pets/get/servers/0"}]
+  }
+}
+```
+
+同例中还会有一条 `server-added`（`severity: non_breaking`，`location: servers[https://new.example.com/v2]`）。若上例把 `servers` 从操作级移到根级但 URL 不变，或两版都未声明任何 `servers`，则**不返回**任何 `server-*` 发现。
 
 > 页面内「规则说明」标签有完整列表；每条发现都带稳定的 `rule_id`（如 `property-became-required`、`enum-value-added`），便于在 CI 中按规则处理。
 
@@ -537,7 +608,7 @@ curl -X POST http://localhost:8000/api/reviews/1/link-preview \
 
 **裁剪规则**：
 
-- 旧、新两份文档各自只保留：文档头（`openapi` / `info`，服务器类发现含 `servers`）、该发现所属的 **path / operation**（操作级发现同时保留 path 级 `parameters`，因为引擎会将其合并进操作比较）；
+- 旧、新两份文档各自只保留：文档头（`openapi` / `info`，服务器类发现含根级 `servers`）、该发现所属的 **path / operation**（操作级发现同时保留 path 级 `parameters` 与 path 级 `servers`，因为引擎会将其合并 / 生效进操作比较）；
 - 从保留内容出发做**本地 `$ref` 闭包**：传递引用到的 `components`（schemas / parameters / requestBodies / pathItems 等）按原指针位置复制进最小文档，闭包用 visited 集合**去重**、对 A→B→A 这类**循环引用安全终止**；
 - 未被引用的路径与组件一律剔除。
 
@@ -581,7 +652,7 @@ curl -X POST http://localhost:8000/api/reviews/1/link-preview \
 │   ├── main.py        # FastAPI：审查 / 历史 / 引用树 / 根因聚合 / 破坏项对账 / 组件可达性审计 / 调用清单影响定位 / 请求样本回放 / Link 参数预览 / 限时豁免 / 报告下载 / 健康检查接口
 │   ├── parser.py      # JSON·YAML 载入与 OpenAPI 3.x 校验
 │   ├── refs.py        # JSON Pointer、$ref 解析、循环安全的引用展开树
-│   ├── diff.py        # 语义兼容性规则引擎（请求/响应双方向 + 操作级/根级 security 认证要求）
+│   ├── diff.py        # 语义兼容性规则引擎（请求/响应双方向 + 操作级/根级 security + 操作级/路径级/根级 servers 生效比较）
 │   ├── groups.py      # 根因聚合：端点×方向分区、同源归并、祖先吸收的有向影响组
 │   ├── reconcile.py   # 破坏项对账：稳定身份配对，输出新增 / 延续 / 已消失
 │   ├── reachability.py # 组件可达性审计：paths/webhooks 入口 → 本地 $ref 传递追踪，未触达组件与无效引用

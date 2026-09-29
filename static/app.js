@@ -1876,7 +1876,7 @@
         "<code>新增路径 / 新增操作</code>：🟢 纯扩展",
         "<code>operationId 改变</code>：⚪ codegen 客户端可能受影响",
         "<code>操作/参数/响应标记 deprecated</code>：🟡 废弃提示",
-        "<code>移除 servers 地址</code>：🔴 仍在使用该地址的客户端失效",
+        "<code>servers 地址变化</code>：按操作级 → 路径级 → 根级取实际生效 servers（均无声明为默认 /）；旧版独有地址 🔴 server-removed，新版独有 🟢 server-added；被覆盖的根地址不报告",
       ],
     },
     {

@@ -41,6 +41,10 @@ class Finding:
     message: str
     old_value: Any = None
     new_value: Any = None
+    # servers 类发现专用：两侧"实际生效 servers"的上下文（来源层 / 声明指针 /
+    # 去重后的生效 URL 列表），None 表示不适用
+    old_servers: dict[str, Any] | None = None
+    new_servers: dict[str, Any] | None = None
     id: int | None = None
 
 
@@ -271,8 +275,6 @@ class Engine:
                 old_value=ov, new_value=nv,
             )
 
-        self._compare_servers()
-
         old_paths = self.old.get("paths") or {}
         new_paths = self.new.get("paths") or {}
         old_set, new_set = set(old_paths), set(new_paths)
@@ -303,31 +305,120 @@ class Engine:
         for p in sorted(old_set & new_set):
             self._compare_path_item(p, old_paths[p], new_paths[p])
 
-    def _compare_servers(self) -> None:
-        old_urls = [s.get("url") for s in (self.old.get("servers") or []) if isinstance(s, dict)]
-        new_urls = [s.get("url") for s in (self.new.get("servers") or []) if isinstance(s, dict)]
-        for u in old_urls:
-            if u not in new_urls:
-                self.add(
-                    rule_id="server-removed", severity=BREAKING, category="服务器",
-                    direction="none", change="removed", endpoint=None,
-                    location="servers",
-                    old_json_path="/servers", new_json_path="/servers",
-                    old_ref=None, new_ref=None,
-                    message=f"移除服务器地址 {u}，仍在使用该地址的客户端将无法访问。",
-                    old_value=u, new_value=None,
-                )
-        for u in new_urls:
-            if u not in old_urls:
-                self.add(
-                    rule_id="server-added", severity=NON_BREAKING, category="服务器",
-                    direction="none", change="added", endpoint=None,
-                    location="servers",
-                    old_json_path="/servers", new_json_path="/servers",
-                    old_ref=None, new_ref=None,
-                    message=f"新增服务器地址 {u}。",
-                    old_value=None, new_value=u,
-                )
+    # ------------------------------------------------------------------ #
+    # 服务器（servers）
+    # ------------------------------------------------------------------ #
+    def _effective_servers(
+        self,
+        doc: dict[str, Any],
+        raw_path_item: Any,
+        raw_op: Any,
+        base: str,
+        path_ptr: str,
+    ) -> tuple[list[str], str, str]:
+        """计算操作实际生效的 servers（OpenAPI 3.x 优先级：操作级 → 路径级 → 根级）。
+
+        各层取**首个非空 servers 列表**（显式空数组 [] 视为"该层不声明"，
+        继续向下回落），三层均无可用列表时按规范使用默认地址 "/"。
+
+        返回 (去重保序后的 URL 列表, 生效声明 JSON Pointer, 来源)。
+        来源取值：operation / path / root / default。pathItem / operation 经
+        $ref 解引用时，指针指向 servers 的实际声明位置（组件内部）。
+        """
+        # 操作级（3.1 中 $ref 兄弟节点上的 servers 同样生效）
+        servers = _node_servers(raw_op)
+        if servers is not None:
+            return _server_urls(servers), base + "/servers", "operation"
+        target, pointer = self._target(doc, raw_op)
+        servers = _node_servers(target)
+        if servers is not None:
+            op_ptr = (
+                f"{pointer}/servers" if pointer and "servers" in (target or {})
+                else base + "/servers"
+            )
+            return _server_urls(servers), op_ptr, "operation"
+        # 路径级
+        servers = _node_servers(raw_path_item)
+        if servers is not None:
+            return _server_urls(servers), path_ptr + "/servers", "path"
+        target, pointer = self._target(doc, raw_path_item)
+        servers = _node_servers(target)
+        if servers is not None:
+            pi_ptr = (
+                f"{pointer}/servers" if pointer and "servers" in (target or {})
+                else path_ptr + "/servers"
+            )
+            return _server_urls(servers), pi_ptr, "path"
+        # 根级
+        servers = _node_servers(doc)
+        if servers is not None:
+            return _server_urls(servers), "/servers", "root"
+        # 三层均无：OpenAPI 默认地址
+        return ["/"], base, "default"
+
+    def _compare_servers(
+        self,
+        endpoint: str,
+        base: str,
+        path_ptr: str,
+        old_path_item: Any,
+        new_path_item: Any,
+        raw_old_op: Any,
+        raw_new_op: Any,
+    ) -> None:
+        """比较两版同一**共同操作**实际生效的 servers。
+
+        生效优先级：操作级 → 路径级（Path Item）→ 根级，各层取首个非空
+        servers 列表，均无则为 OpenAPI 默认地址 "/"。按 URL 去重后比较：
+        旧版独有报破坏性移除（server-removed），新版独有报兼容新增
+        （server-added）。根地址被操作 / 路径级覆盖时不产生任何发现。
+        新增 / 删除操作由 operation-added / operation-removed 覆盖，不在此比较。
+        """
+        old_urls, old_ptr, old_src = self._effective_servers(
+            self.old, old_path_item, raw_old_op, base, path_ptr,
+        )
+        new_urls, new_ptr, new_src = self._effective_servers(
+            self.new, new_path_item, raw_new_op, base, path_ptr,
+        )
+
+        old_set, new_set = set(old_urls), set(new_urls)
+        removed = [u for u in old_urls if u not in new_set]
+        added = [u for u in new_urls if u not in old_set]
+
+        old_ctx = _server_context(old_urls, old_src, old_ptr)
+        new_ctx = _server_context(new_urls, new_src, new_ptr)
+
+        for u in removed:
+            self.add(
+                rule_id="server-removed", severity=BREAKING, category="服务器",
+                direction="none", change="removed", endpoint=endpoint,
+                location="servers",
+                old_json_path=old_ptr, new_json_path=new_ptr,
+                old_ref=None, new_ref=None,
+                message=(
+                    f"操作 {endpoint} 的生效服务器地址移除 {u}（旧版生效声明："
+                    f"{_server_source_cn(old_src)} {old_ptr}；新版生效声明："
+                    f"{_server_source_cn(new_src)} {new_ptr}），"
+                    "仍在使用该地址的客户端将无法访问。"
+                ),
+                old_value=u, new_value=None,
+                old_servers=old_ctx, new_servers=new_ctx,
+            )
+        for u in added:
+            self.add(
+                rule_id="server-added", severity=NON_BREAKING, category="服务器",
+                direction="none", change="added", endpoint=endpoint,
+                location="servers",
+                old_json_path=old_ptr, new_json_path=new_ptr,
+                old_ref=None, new_ref=None,
+                message=(
+                    f"操作 {endpoint} 的生效服务器地址新增 {u}（旧版生效声明："
+                    f"{_server_source_cn(old_src)} {old_ptr}；新版生效声明："
+                    f"{_server_source_cn(new_src)} {new_ptr}）。"
+                ),
+                old_value=None, new_value=u,
+                old_servers=old_ctx, new_servers=new_ctx,
+            )
 
     def _compare_path_item(self, path: str, raw_old_item: Any, raw_new_item: Any) -> None:
         old_item, _ = self._target(self.old, raw_old_item)
@@ -363,6 +454,7 @@ class Engine:
         for m in sorted(old_methods & new_methods):
             self._compare_operation(
                 path, m,
+                f"/paths{encode_path(path)}",
                 raw_old_item, raw_new_item,
                 old_item[m], new_item[m],
             )
@@ -371,6 +463,7 @@ class Engine:
         self,
         path: str,
         method: str,
+        path_ptr: str,
         old_path_item: Any,
         new_path_item: Any,
         raw_old_op: Any,
@@ -432,6 +525,11 @@ class Engine:
         )
         self._compare_request_body(endpoint, base, old_op, new_op)
         self._compare_responses(endpoint, base, old_op, new_op)
+        self._compare_servers(
+            endpoint, base, path_ptr,
+            old_path_item, new_path_item,
+            raw_old_op, raw_new_op,
+        )
         self._compare_security(
             endpoint, base, raw_old_op, old_op, raw_new_op, new_op
         )
@@ -1708,6 +1806,58 @@ def _media_types(rb: Any) -> list[str]:
     if isinstance(rb, dict) and isinstance(rb.get("content"), dict):
         return list(rb["content"])
     return []
+
+
+# ---------------------------------------------------------------------- #
+# 服务器（servers）
+# ---------------------------------------------------------------------- #
+def _node_servers(node: Any) -> list[Any] | None:
+    """取节点上"首个非空 servers 列表"。
+
+    - 节点未声明 servers 或值不是数组：返回 None（该层不生效，向下回落）；
+    - 显式空数组 []：同样视为不声明（返回 None），不把"清空"当作生效列表；
+    - 非空数组：原样返回（其中非对象元素在提取 URL 时忽略）。
+    """
+    if not isinstance(node, dict):
+        return None
+    servers = node.get("servers")
+    if isinstance(servers, list) and servers:
+        return servers
+    return None
+
+
+def _server_urls(servers: list[Any]) -> list[str]:
+    """从 servers 列表提取 URL，非字符串 URL 以 str() 归一；按首次出现去重保序。"""
+    urls: list[str] = []
+    for s in servers:
+        if isinstance(s, dict) and s.get("url") is not None:
+            u = str(s["url"])
+            if u not in urls:
+                urls.append(u)
+    return urls
+
+
+_SERVER_SOURCE_CN = {
+    "operation": "操作级",
+    "path": "路径级",
+    "root": "根级",
+    "default": "缺省默认",
+}
+
+
+def _server_source_cn(source: str) -> str:
+    return _SERVER_SOURCE_CN.get(source, source)
+
+
+def _server_context(
+    urls: list[str], source: str, pointer: str
+) -> dict[str, Any]:
+    """servers 类发现的单侧上下文：生效来源层、声明指针与去重后的生效 URL 列表。"""
+    return {
+        "source": source,  # operation=操作级 | path=路径级 | root=根级 | default=缺省 "/"
+        "pointer": pointer,
+        "urls": urls,
+    }
 
 
 # ---------------------------------------------------------------------- #

@@ -103,13 +103,14 @@ def _needs_security(finding: dict[str, Any]) -> bool:
     )
 
 
-def _trim_path_item(item: Any, method: str | None) -> Any:
+def _trim_path_item(item: Any, method: str | None, keep_servers: bool = False) -> Any:
     """裁剪单个 path item。
 
     - 路径级发现（method=None）：整个 path item 都属于发现现场，原样保留；
     - 引用型 path item：保留 $ref，由闭包把目标组件复制进来；
     - 操作级发现：只保留目标 operation 与 path 级 parameters
-      （引擎会把 path 级参数合并进操作比较，必须保留才能原样复现）。
+      （引擎会把 path 级参数合并进操作比较，必须保留才能原样复现）；
+      servers 类发现还需保留 path 级 servers（操作实际生效地址可能继承该层）。
     """
     if not isinstance(item, dict):
         return copy.deepcopy(item)
@@ -118,6 +119,8 @@ def _trim_path_item(item: Any, method: str | None) -> Any:
     out: dict[str, Any] = {}
     if isinstance(item.get("parameters"), list):
         out["parameters"] = copy.deepcopy(item["parameters"])
+    if keep_servers and isinstance(item.get("servers"), list):
+        out["servers"] = copy.deepcopy(item["servers"])
     if isinstance(item.get(method), dict):
         out[method] = copy.deepcopy(item[method])
     return out
@@ -143,7 +146,7 @@ def _minimal_doc(
     kept: dict[str, Any] = {}
     if path is not None and path in paths:
         # 该侧没有此路径时不补空壳：路径缺失本身就是差异现场（如 path-removed）
-        kept[path] = _trim_path_item(paths[path], method)
+        kept[path] = _trim_path_item(paths[path], method, keep_servers)
     out["paths"] = kept
     return out
 

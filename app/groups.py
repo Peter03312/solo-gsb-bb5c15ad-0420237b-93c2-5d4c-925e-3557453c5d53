@@ -30,6 +30,9 @@ WHOLESALE_REPLACE_RULES = {
 # 父路径"整体删除"类规则（指针即被删子树的根）。
 # parameter-removed 刻意不在此列：其指针指向 parameters 容器数组而非单个
 # 参数，若参与吸收会误并同操作下其他参数的独立发现。
+# server-removed 同样不在此列：servers 比较已细化到"共同操作的生效地址"，
+# 缺省侧（默认地址 "/"）指针锚到操作对象，吸收会误吞该操作下的参数 /
+# 请求体 / 响应等独立发现；非缺省侧指针锚到 servers 数组，本就无后代。
 WHOLESALE_REMOVE_RULES = {
     "path-removed",
     "operation-removed",
@@ -40,7 +43,6 @@ WHOLESALE_REMOVE_RULES = {
     "property-removed",
     "property-removed-request",
     "property-removed-writeonly",
-    "server-removed",
 }
 
 WHOLESALE_RULES = WHOLESALE_REPLACE_RULES | WHOLESALE_REMOVE_RULES

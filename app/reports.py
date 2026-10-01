@@ -7,6 +7,13 @@ from typing import Any
 from .diff import BREAKING, DEPRECATION, INFO, NON_BREAKING
 from .exemptions import STATUS_CN as EXEMPTION_STATUS_CN
 
+_SERVER_SOURCE_CN = {
+    "operation": "操作级",
+    "path": "路径级",
+    "root": "根级",
+    "default": "缺省默认",
+}
+
 SEV_CN = {
     BREAKING: "🔴 破坏性",
     NON_BREAKING: "🟢 兼容",
@@ -168,6 +175,14 @@ def _render_finding_table(
             lines.append(
                 f"- 新值：`{json.dumps(f.get('new_value'), ensure_ascii=False)}`"
             )
+        if f.get("old_servers") or f.get("new_servers"):
+            for side_name, ctx in (("旧版生效 servers", f.get("old_servers")),
+                                   ("新版生效 servers", f.get("new_servers"))):
+                if ctx:
+                    lines.append(
+                        f"- {side_name}（{_SERVER_SOURCE_CN.get(ctx.get('source'), ctx.get('source'))}"
+                        f" `{ctx.get('pointer')}`）：`{json.dumps(ctx.get('urls'), ensure_ascii=False)}`"
+                    )
         ex = f.get("exemption")
         if ex:
             lines.append(

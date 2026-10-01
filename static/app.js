@@ -587,6 +587,28 @@
     ].join("");
   }
 
+  const SERVER_SOURCE_LABEL = {
+    operation: "操作级",
+    path: "路径级",
+    root: "根级",
+    default: "缺省默认",
+  };
+
+  /** servers 类发现：展示新旧两侧实际生效的声明层 / 指针 / URL 集合。 */
+  function serverContextHtml(f) {
+    if (!f.old_servers || !f.new_servers) return "";
+    const row = (side, ctx) => {
+      const label = SERVER_SOURCE_LABEL[ctx.source] || ctx.source;
+      const ptr = ctx.source === "default"
+        ? "（三层均未声明 → 默认地址 /）"
+        : `<code data-tree-side="${side}" data-tree-pointer="${escapeAttr(ctx.pointer || "")}">${escapeHtml(ctx.pointer)}</code>`;
+      return `<div class="srv-row"><span class="k">${side === "old" ? "旧版" : "新版"}生效</span>
+        <span class="srv-source">${label}</span>${ptr}
+        <span class="srv-urls">${escapeHtml((ctx.urls || []).join(", "))}</span></div>`;
+    };
+    return `<div class="server-context">${row("old", f.old_servers)}${row("new", f.new_servers)}</div>`;
+  }
+
   /** 发现详情体：定位 / 双侧指针 / 旧新值 / 规则 / 复现导出（两种视图共用）。 */
   function findingBodyHtml(f) {
     const hasValues = f.old_value !== null || f.new_value !== null;
@@ -596,6 +618,7 @@
       ? `<div class="value-box"><div class="vb-label">新值</div><pre>${escapeHtml(pretty(f.new_value))}</pre></div>` : "";
     return `
       <div class="loc-line">📍 ${escapeHtml(f.location)}</div>
+      ${serverContextHtml(f)}
       <div class="path-rows">
         <span class="k">旧路径</span>
         <code data-tree-side="old" data-tree-pointer="${escapeAttr(f.old_json_path || "")}"
@@ -1876,7 +1899,7 @@
         "<code>新增路径 / 新增操作</code>：🟢 纯扩展",
         "<code>operationId 改变</code>：⚪ codegen 客户端可能受影响",
         "<code>操作/参数/响应标记 deprecated</code>：🟡 废弃提示",
-        "<code>移除 servers 地址</code>：🔴 仍在使用该地址的客户端失效",
+        "<code>移除 servers 生效地址</code>：🔴 按操作级→路径级→根级解析生效 servers（均无则为 /），仅对两版共同操作按 URL 比较，被覆盖的根地址不告警",
       ],
     },
     {
